@@ -108,10 +108,10 @@ async function handleTextMessage(event) {
     } else if (source.type === 'group') {
       // 群組文字訊息，要不要回都看你
       // 這裡示範直接回一句話
-      await lineClient.replyMessage(replyToken, {
-        type: 'text',
-        text: '群組目前只支援圖片分析！\n若有相關健康疑問可以私訊我！'
-      });
+      // await lineClient.replyMessage(replyToken, {
+      //   type: 'text',
+      //   text: '群組目前只支援圖片分析！\n若有相關健康疑問可以私訊我！'
+      // });
     }
   } catch (error) {
     console.error('handleTextMessage Error:', error);
@@ -152,7 +152,7 @@ async function handleImageMessage(event) {
     // 1. 立即回覆「運轉中」訊息
     await lineClient.replyMessage(replyToken, {
       type: 'text',
-      text: '食物大腦運轉中，請稍候 ... ✨'
+      text: '正在辨識你的食物中，請稍候...✨'
     });
 
     // 2. 取得圖片 Buffer
