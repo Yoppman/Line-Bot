@@ -168,14 +168,45 @@ async function handleImageMessage(event) {
       // ============== 群組照片處理邏輯 ==============
       const groupId = source.groupId; 
 
-      // Call ChatGPT API 分析
-      const responseMsg = await callChatGPTAPI(imageBase64);
-
-      // Push 結果回群組
-      await lineClient.pushMessage(groupId, {
-        type: 'text',
-        text: responseMsg
-      });
+      try {
+        // Attempt to get the user's profile
+        const [responseMsg, profile] = await Promise.all([
+            callChatGPTAPI(imageBase64),
+            lineClient.getProfile(event.source.userId)
+        ]);
+        
+        // Push message with mention
+        await lineClient.pushMessage(groupId, {
+          type: 'textV2',
+          text: `{user} ${responseMsg}`,
+          substitution: {
+            "user": {
+              "type": "mention",
+              "mentionee": {
+                "type": "user",
+                "userId": profile.userId
+              }
+            }
+          }
+        });
+    } catch (error) {
+        // Handle the case where getProfile fails (e.g., 404 error)
+        if (error.statusCode === 404) {
+            console.error("User hasn't added the bot as a friend, using fallback message.");
+    
+            const responseMsg = await callChatGPTAPI(imageBase64);
+    
+            // Push message without a mention
+            await lineClient.pushMessage(groupId, {
+                type: 'text',
+                text: `${responseMsg} \n記得加入此帳號為好友以獲得最佳體驗：）`, // Fallback message without mention
+            });
+        } else {
+            // Log unexpected errors
+            console.error('Unexpected error:', error);
+            throw error; // Optionally rethrow if needed
+        }
+    }
 
     } else if (source.type === 'user') {
       // ============== 私訊照片處理邏輯 ==============
