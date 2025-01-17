@@ -32,6 +32,17 @@ const client = new openai.OpenAI({
 // ---------- 建立 Express App ----------
 const app = express();
 
+// Initialize the global store, Why Global Variables Are Problematic
+// Multi-instance scaling: If you run multiple Node.js instances (or Docker containers) behind a load balancer, each instance will have its own copy of global.tempFoodData. That means user session data can get lost or inconsistent if the bot routes messages to different instances.
+// Data disappears on restart: If your process restarts, you lose the in-memory data.
+// Potential memory leaks: If you forget to remove old entries, your Node.js process might grow in memory usage over time.
+
+// Better Approaches
+// Redis or an In-Memory Distributed Cache
+// If you need ephemeral storage that can be shared across multiple Node instances, a cache like Redis is a common solution.
+// You’d store data in Redis keyed by userId:
+global.tempFoodData = {};
+
 // ---------- 設定 body parser 並保存原始 body ----------
 app.use('/webhook', express.json({
   verify: (req, res, buf) => {
@@ -46,6 +57,8 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
     for (let event of events) {
       if (event.type === 'message' && event.message.type === 'image') {
+        // handle 已經加好友的人 創建user query
+        // await handleFollowEvent(event);
         // 如果是圖片訊息 (群組裡傳圖片) -> 處理食物分析
         await handleImageMessage(event);
       } else if (event.type === 'memberJoined') {
@@ -54,6 +67,9 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       } else if (event.type === 'message' && event.message.type === 'text') {
         // 文字訊息 -> 可能是私訊或群組
         await handleTextMessage(event);
+      } else if (event.type === 'follow') {
+        // 加入好友時創建新user在資料庫
+        await handleFollowEvent(event);
       }
     }
 
@@ -92,49 +108,155 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
     }
   }
 
-  // 這是新增的文字訊息處理函式
+  async function handleFollowEvent(event) {
+    try {
+      const userId = event.source.userId;
+
+      // 0. Retrieve the user's LINE profile
+      let profile = null;
+      try {
+        profile = await lineClient.getProfile(userId);
+      } catch (err) {
+        console.error('Failed to fetch user profile:', err.response?.data || err.message);
+      }
+  
+      const userName = profile?.displayName || `LINEUser-${userId.slice(-5)}`; // Fallback to default name if profile is unavailable
+  
+      // 1. Check if user already exists in your backend
+      //    We need an endpoint that looks up by line_user_id.
+      //    Example: GET /users?line_user_id={userId}
+  
+      let userExists = false;
+      let existingUserData = null;
+      try {
+        const res = await axios.get(`https://lipo-out-backend-production.up.railway.app/users/`, {
+          params: {
+            line_user_id: userId
+          }
+        });
+        // If a user is found, we can mark userExists = true
+        existingUserData = res.data;
+        userExists = true;
+      } catch (err) {
+        // If 404 from backend, it means user not found; ignore
+        // If other error, handle accordingly
+        console.log('User not found or error:', err.response?.data || err.message);
+      }
+  
+      if (!userExists) {
+        // 2. Create new user in your backend
+        //    "UserCreate" requires at least 'name' (string) and 'goal' (string).
+        //    You can pass default values for them if you don’t have any from LINE.
+        const newUser = {
+          name: userName,
+          goal: 'Moderate',
+          line_user_id: userId
+        };
+  
+        const createRes = await axios.post(
+          'https://lipo-out-backend-production.up.railway.app/users/',
+          newUser
+        );
+        console.log('New user created:', createRes.data);
+      }
+    } catch (error) {
+      console.error('handleFollowEvent Error:', error);
+    }
+  }
+
 async function handleTextMessage(event) {
   try {
     const { replyToken, message, source } = event;
     const userMessage = message.text;
 
     if (source.type === 'user') {
-      // 私訊聊天：呼叫 ChatGPT
-      const responseMsg = await callChatGPTText(userMessage);
-      await lineClient.replyMessage(replyToken, {
-        type: 'text',
-        text: responseMsg
-      });
-    } else if (source.type === 'group') {
-      // 群組文字訊息，要不要回都看你
-      // 這裡示範直接回一句話
-      // await lineClient.replyMessage(replyToken, {
-      //   type: 'text',
-      //   text: '群組目前只支援圖片分析！\n若有相關健康疑問可以私訊我！'
-      // });
+      const userId = source.userId;
+
+      // Case 1: user wants to save food record
+      if (userMessage === '儲存這筆記錄') {
+        // 1. Retrieve the previously stored analysis data
+        const tempData = global.tempFoodData[userId];
+        if (!tempData) {
+          await lineClient.replyMessage(replyToken, {
+            type: 'text',
+            text: '抱歉，無法找到分析資料，請再試一次。'
+          });
+          return;
+        }
+
+        // 2. Find user’s DB ID via line_user_id
+        let dbUserId;
+        try {
+          const res = await axios.get(`https://lipo-out-backend-production.up.railway.app/users/`, {
+            params: { line_user_id: userId }
+          });
+          // If the user array returns:
+          const foundUser = res.data[0]; 
+          dbUserId = foundUser.id;
+        } catch (err) {
+          console.log('User not found error:', err.message);
+          // Optionally create the user here if not found,
+          // but ideally they should be created upon follow event
+          await lineClient.replyMessage(replyToken, {
+            type: 'text',
+            text: '抱歉，尚未建立用戶資料。請先加我為好友或重新嘗試。'
+          });
+          return;
+        }
+
+        // 3. Send POST /foods to your backend
+        const bodyData = {
+          user_id: dbUserId,
+          food_analysis: tempData.text, // or your own text
+          food_photo: tempData.imageBase64,
+          protein: tempData.protein,
+          carb: tempData.carbohydrates,
+          fat: tempData.fat,
+          calories: tempData.calories
+        };
+
+        try {
+          const createFoodRes = await axios.post(
+            'https://lipo-out-backend-production.up.railway.app/foods/',
+            bodyData
+          );
+          console.log('Food created:', createFoodRes.data);
+
+          // 4. Inform user
+          await lineClient.replyMessage(replyToken, {
+            type: 'text',
+            text: '已為您儲存此食物紀錄！'
+          });
+
+          // Optionally clear the temp data
+          delete global.tempFoodData[userId];
+        } catch (error) {
+          console.log('Create food error:', error.response?.data || error.message);
+          await lineClient.replyMessage(replyToken, {
+            type: 'text',
+            text: '無法儲存此食物紀錄，請稍後再試。'
+          });
+        }
+
+      // Case 2: user chooses "否"
+      } else if (userMessage === '不用了') {
+        await lineClient.replyMessage(replyToken, {
+          type: 'text',
+          text: '好的，沒有儲存這筆資料。'
+        });
+        delete global.tempFoodData[userId];  // Clean up
+      } 
+      // Case 3: otherwise, just do your normal ChatGPT text logic
+      else {
+        const responseMsg = await callChatGPTText(userMessage);
+        await lineClient.replyMessage(replyToken, {
+          type: 'text',
+          text: responseMsg
+        });
+      }
     }
   } catch (error) {
     console.error('handleTextMessage Error:', error);
-  }
-}
-
-async function callChatGPTText(userText) {
-  try {
-    const chatCompletion = await client.chat.completions.create({
-      model: 'gpt-4',
-      messages: [
-        { role: 'system', content: prompts.gpt_systemp_prompt_Mandarin },
-        { role: 'user', content: userText }
-      ],
-      temperature: 0.7,
-      max_tokens: 512
-    });
-
-    const answer = chatCompletion.choices[0].message.content.trim();
-    return answer;
-  } catch (error) {
-    console.error('callChatGPTText Error:', error.response?.data || error.message);
-    return '抱歉，目前無法處理您的訊息。';
   }
 }
 
@@ -150,10 +272,10 @@ async function handleImageMessage(event) {
     const messageId = message.id;
 
     // 1. 立即回覆「運轉中」訊息
-    await lineClient.replyMessage(replyToken, {
-      type: 'text',
-      text: '正在辨識你的食物中，請稍候...✨'
-    });
+    // await lineClient.replyMessage(replyToken, {
+    //   type: 'text',
+    //   text: '正在辨識你的食物中，請稍候...✨'
+    // });
 
     // 2. 取得圖片 Buffer
     const stream = await lineClient.getMessageContent(messageId);
@@ -176,9 +298,14 @@ async function handleImageMessage(event) {
         ]);
         
         // Push message with mention
-        await lineClient.pushMessage(groupId, {
+        await lineClient.replyMessage(replyToken, [
+          {
+            type: 'text',
+            text: '正在辨識你的食物中，請稍候...✨'
+          },
+          {
           type: 'textV2',
-          text: `{user} ${responseMsg}`,
+          text: `{user} ${responseMsg.text}`,
           substitution: {
             "user": {
               "type": "mention",
@@ -188,7 +315,8 @@ async function handleImageMessage(event) {
               }
             }
           }
-        });
+        }]);
+
     } catch (error) {
         // Handle the case where getProfile fails (e.g., 404 error)
         if (error.statusCode === 404) {
@@ -212,18 +340,46 @@ async function handleImageMessage(event) {
       // ============== 私訊照片處理邏輯 ==============
       const userId = source.userId;
 
-      // 儲存圖片，在此進行
-
-      // 後續若仍要呼叫 ChatGPT 分析
       const responseMsg = await callChatGPTAPI(imageBase64);
-
-      // 這邊使用 pushMessage
-      // replyMessage內的replytoken只能使用一次就失效
-      // 而且 replyMessage 若超過30秒才回會error
-      await lineClient.pushMessage(userId, {
+      const { text, carbohydrates, protein, fat, calories } = responseMsg;
+      // 3c. Send user the analysis + ask if want to save it
+      await lineClient.replyMessage(replyToken, {
         type: 'text',
-        text: responseMsg
+        text: `分析結果如下：\n${responseMsg.text}\n\n是否要儲存到您的紀錄？`,
+        quickReply: {
+          items: [
+            {
+              type: 'action',
+              action: {
+                type: 'message',
+                label: '是',
+                text: '儲存這筆記錄'
+              }
+            },
+            {
+              type: 'action',
+              action: {
+                type: 'message',
+                label: '否',
+                text: '不用了'
+              }
+            }
+          ]
+        }
       });
+
+      // 3d. Store the data temporarily in some in-memory object,
+      //     or in a DB with a "pending" state, or via session
+      //     so that when user replies "是", you know what to save.
+      //     For simplicity, let’s assume you have a global in-memory map:
+      global.tempFoodData[userId] = {
+        imageBase64,
+        text,
+        carbohydrates,
+        protein,
+        fat,
+        calories
+      };
     }
 
   } catch (error) {
@@ -245,13 +401,17 @@ async function callChatGPTAPI(image) {
                     }
         ] }
         ],
+        response_format: { "type": "json_object" },
         temperature: 0.2,
         max_tokens: 512,
         frequency_penalty: 0.0
       });
       // 提取 ChatGPT 的回應內容
-      const answer = chatCompletion.choices[0].message.content.trim();
-      return answer;
+      const answer = chatCompletion.choices[0].message.content;
+        // If the answer is a JSON string, parse it
+      const parsedAnswer = JSON.parse(answer); // Parse JSON-formatted string
+
+      return parsedAnswer;
     } catch (error) {
       console.error('callChatGPTAPI Error:', error.response?.data || error.message);
       return '抱歉，目前無法處理這張圖片或問題。';
