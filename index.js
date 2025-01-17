@@ -337,49 +337,66 @@ async function handleImageMessage(event) {
     }
 
     } else if (source.type === 'user') {
-      // ============== 私訊照片處理邏輯 ==============
-      const userId = source.userId;
+        // ============== 私訊照片處理邏輯 ==============
+        const userId = source.userId;
 
-      const responseMsg = await callChatGPTAPI(imageBase64);
-      const { text, carbohydrates, protein, fat, calories } = responseMsg;
-      // 3c. Send user the analysis + ask if want to save it
-      await lineClient.replyMessage(replyToken, {
-        type: 'text',
-        text: `分析結果如下：\n${responseMsg.text}\n\n是否要儲存到您的紀錄？`,
-        quickReply: {
-          items: [
-            {
-              type: 'action',
-              action: {
-                type: 'message',
-                label: '是',
-                text: '儲存這筆記錄'
-              }
-            },
-            {
-              type: 'action',
-              action: {
-                type: 'message',
-                label: '否',
-                text: '不用了'
-              }
+        // 1. Call your ChatGPT API
+        const responseMsg = await callChatGPTAPI(imageBase64);
+        const { text, carbohydrates, protein, fat, calories } = responseMsg;
+
+        // 2. Check if the text contains digits
+        const containsNumber = /\d/.test(text);
+
+        // 3. Build a final reply text
+        let finalText = text; // base text from GPT
+
+        // If it contains a number (likely a food analysis), ask if user wants to save
+        if (containsNumber) {
+          finalText += "\n\n是否要儲存到您的紀錄？";
+
+          // Send message with Quick Replies
+          await lineClient.replyMessage(replyToken, {
+            type: 'text',
+            text: finalText,
+            quickReply: {
+              items: [
+                {
+                  type: 'action',
+                  action: {
+                    type: 'message',
+                    label: '是',
+                    text: '儲存這筆記錄'
+                  }
+                },
+                {
+                  type: 'action',
+                  action: {
+                    type: 'message',
+                    label: '否',
+                    text: '不用了'
+                  }
+                }
+              ]
             }
-          ]
-        }
-      });
+          });
 
-      // 3d. Store the data temporarily in some in-memory object,
-      //     or in a DB with a "pending" state, or via session
-      //     so that when user replies "是", you know what to save.
-      //     For simplicity, let’s assume you have a global in-memory map:
-      global.tempFoodData[userId] = {
-        imageBase64,
-        text,
-        carbohydrates,
-        protein,
-        fat,
-        calories
-      };
+          // Store the data for potential saving
+          global.tempFoodData[userId] = {
+            imageBase64,
+            text,
+            carbohydrates,
+            protein,
+            fat,
+            calories
+          };
+
+        } else {
+          // If no number found, just reply with the text (no Quick Replies)
+          await lineClient.replyMessage(replyToken, {
+            type: 'text',
+            text: finalText
+          });
+        }
     }
 
   } catch (error) {
@@ -407,7 +424,8 @@ async function callChatGPTAPI(image) {
         frequency_penalty: 0.0
       });
       // 提取 ChatGPT 的回應內容
-      const answer = chatCompletion.choices[0].message.content;
+      // 若不是食物，營養素為0
+      const answer = chatCompletion.choices[0].message.content; 
         // If the answer is a JSON string, parse it
       const parsedAnswer = JSON.parse(answer); // Parse JSON-formatted string
 
