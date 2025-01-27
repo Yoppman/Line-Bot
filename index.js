@@ -438,6 +438,25 @@ async function callChatGPTAPI(image) {
     }
   }
 
+async function callChatGPTText(userText) {
+  try {
+    const chatCompletion = await client.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: prompts.gpt_systemp_prompt_Mandarin },
+        { role: 'user', content: userText }
+      ],
+      temperature: 0.7,
+      max_tokens: 512
+    });
+    const answer = chatCompletion.choices[0].message.content.trim();
+    return answer;
+  } catch (error) {
+    console.error('callChatGPTText Error:', error.response?.data || error.message);
+    return '抱歉，目前無法處理您的訊息。';
+  }
+}
+
 // ---------- 啟動伺服器 ----------
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
