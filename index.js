@@ -83,6 +83,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   // ---------- 處理新成員加入事件 ----------
   async function handleMemberJoined(event) {
     try {
+      const { replyToken, message, source } = event;
       const groupId = event.source.groupId; // 群組 ID
       const joinedMembers = event.joined.members; // 新加入的成員資料
   
@@ -267,9 +268,10 @@ async function handleTextMessage(event) {
 // 4) Push the final ChatGPT result back to the user (or group)
 
 async function handleImageMessage(event) {
+  const { replyToken, message, source } = event;
+  const messageId = message.id;
+
   try {
-    const { replyToken, message, source } = event;
-    const messageId = message.id;
 
     // 1. 立即回覆「運轉中」訊息
     // await lineClient.replyMessage(replyToken, {
@@ -327,7 +329,7 @@ async function handleImageMessage(event) {
             // Push message without a mention
             await lineClient.replyMessage(replyToken, {
                 type: 'text',
-                text: `${responseMsg} \n記得加入此帳號為好友以獲得最佳體驗：）`, // Fallback message without mention
+                text: `${responseMsg.text} \n記得加入此帳號為好友以獲得最佳體驗：）`, // Fallback message without mention
             });
         } else {
             // Log unexpected errors
