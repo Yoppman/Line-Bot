@@ -98,7 +98,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           : `歡迎來到這個群組！🎉\n您可以在此聊天中發送食物圖片，我會為您分析！`;
   
         // 傳送歡迎訊息到群組
-        await lineClient.pushMessage(groupId, {
+        await lineClient.replyMessage(replyToken, {
           type: 'text',
           text: welcomeMessage
         });
@@ -325,7 +325,7 @@ async function handleImageMessage(event) {
             const responseMsg = await callChatGPTAPI(imageBase64);
     
             // Push message without a mention
-            await lineClient.pushMessage(groupId, {
+            await lineClient.replyMessage(replyToken, {
                 type: 'text',
                 text: `${responseMsg} \n記得加入此帳號為好友以獲得最佳體驗：）`, // Fallback message without mention
             });
